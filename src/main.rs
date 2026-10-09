@@ -62,6 +62,7 @@ const FORWARDED_RESPONSE_HEADERS: &[&str] = &[
 struct AppState {
     endpoint: String,
     bucket: String,
+    website_host: Option<String>,
     client: Client,
 }
 
@@ -73,6 +74,7 @@ impl AppState {
         )?;
         let bucket =
             normalize_bucket(&env::var("S3_BUCKET").unwrap_or_else(|_| "sites".to_owned()))?;
+        let website_host = env::var("S3_WEBSITE_HOST").ok();
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(30))
@@ -81,6 +83,7 @@ impl AppState {
         Ok(Self {
             endpoint,
             bucket,
+            website_host,
             client,
         })
     }
@@ -213,13 +216,19 @@ async fn fetch_object(
     pathname: &str,
 ) -> Result<reqwest::Response, reqwest::Error> {
     let object_key = encode_object_key(host, pathname);
-    let object_url = format!("{}/{}/{}", state.endpoint, state.bucket, object_key);
+    let object_url = match &state.website_host {
+        Some(_) => format!("{}/{}", state.endpoint, object_key),
+        None => format!("{}/{}/{}", state.endpoint, state.bucket, object_key),
+    };
     let upstream_method = if method == Method::HEAD {
         reqwest::Method::HEAD
     } else {
         reqwest::Method::GET
     };
     let mut request = state.client.request(upstream_method, object_url);
+    if let Some(host) = &state.website_host {
+        request = request.header(header::HOST, host);
+    }
     for name in FORWARDED_REQUEST_HEADERS {
         if let Some(value) = request_headers.get(*name) {
             request = request.header(*name, value.clone());
@@ -576,11 +585,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn website_mode_uses_bucket_host_without_bucket_path() {
+        async fn serve(request: Request<Body>) -> Response {
+            assert_eq!(
+                request.headers().get(header::HOST).unwrap(),
+                "sites.s3.garage"
+            );
+            assert_eq!(request.uri().path(), "/example.me/index.html");
+            Response::builder()
+                .status(StatusCode::OK)
+                .body(Body::from("website"))
+                .unwrap()
+        }
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let storage = tokio::spawn(async move {
+            let _ = axum::serve(listener, Router::new().fallback(serve)).await;
+        });
+        let state = AppState {
+            endpoint,
+            bucket: "sites".to_owned(),
+            website_host: Some("sites.s3.garage".to_owned()),
+            client: Client::new(),
+        };
+        let response = fetch_object(
+            &state,
+            &Method::GET,
+            &HeaderMap::new(),
+            "example.me",
+            "/index.html",
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        storage.abort();
+    }
+
+    #[tokio::test]
     async fn serves_static_gateway_behaviour() {
         let (endpoint, storage) = mock_storage().await;
         let state = AppState {
             endpoint,
             bucket: "sites".to_owned(),
+            website_host: None,
             client: Client::new(),
         };
         let gateway = app(state);

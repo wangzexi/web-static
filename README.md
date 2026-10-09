@@ -19,7 +19,7 @@ GET https://example.me/articles/hello/
 - 找不到对象时尝试站点根目录的 404.html，仍返回 HTTP 404。
 - HTML 使用 Cache-Control: no-cache。
 - 文件名包含至少 8 位构建哈希的资源使用长期 immutable 缓存。
-- MinIO bucket 需允许匿名 GetObject，但不应允许匿名列目录或写入。
+- 使用 Garage 时，`sites` bucket 只开放 Website 读取端口；S3 API 仍需凭据。
 
 ## 环境变量
 
@@ -27,6 +27,8 @@ GET https://example.me/articles/hello/
 PORT=8080
 S3_ENDPOINT=http://minio.minio.svc.cluster.local:9000
 S3_BUCKET=sites
+# Garage Website 模式：S3_ENDPOINT 改为 http://garage.wlsy-storage.svc.cluster.local:3902
+# 同时设置 S3_WEBSITE_HOST=sites.s3.garage；此时 URL 不再含 bucket 路径
 ~~~
 
 ## 本地运行
